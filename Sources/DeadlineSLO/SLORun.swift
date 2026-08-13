@@ -197,6 +197,13 @@ public actor SLORun {
     ///   - fallback: Optional degraded implementation (smaller model, cached value,
     ///     placeholder). Runs under the operation-wide deadline when the primary is
     ///     refused admission, exceeds its stage deadline, or throws.
+    ///
+    ///     Reachability caveat (deliberate, and pinned by a test): a stage with no
+    ///     `cap` and no `reserveForRemainder` is granted the entire remaining
+    ///     budget, so when its primary expires there is nothing left and the
+    ///     fallback is skipped. A stage that wants a reachable fallback after
+    ///     primary expiry must leave itself headroom via `reserveForRemainder`
+    ///     (the fallback then runs inside the reserve) or `cap`.
     /// - Returns: The primary's or fallback's value.
     /// - Throws: `BudgetExhaustedError` when admission is refused and no fallback
     ///   exists; `DeadlineExceededError` when the deadline expires without recovery;
