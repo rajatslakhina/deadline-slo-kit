@@ -56,8 +56,15 @@ let page = try await run.run(
 }
 
 // On-device inference: full model if the budget survived, lite model otherwise.
+// The reserve is load-bearing: it holds back time for render prep, and it is
+// also the window the lite-model fallback runs in. Without it, this stage's
+// allowance would be the WHOLE remaining budget — and a fallback after primary
+// expiry would have zero time left (deliberate semantics, pinned by a test).
 let ranked = try await run.run(
-    StageSpec(name: "on-device-rerank", policy: StagePolicy(minimumViable: .milliseconds(40)))
+    StageSpec(name: "on-device-rerank", policy: StagePolicy(
+        minimumViable: .milliseconds(40),
+        reserveForRemainder: .milliseconds(120)
+    ))
 ) {
     try await fullModel.rerank(page)
 } fallback: {
@@ -107,9 +114,11 @@ If the surrounding task is cancelled, callers see `CancellationError`, never `De
 
 The SLO layer carves each stage's allowance as `min(cap, remaining − reserveForRemainder)`, refusing stages whose allowance falls below `minimumViable`. A proportional split ("network gets 60%, inference 25%…") was rejected: proportions starve mandatory late stages precisely when the budget is under pressure, which is the only time the policy matters. A reserve states the invariant directly: *whatever happens upstream, inference + render prep keep 200 ms.*
 
+Corollary — deliberate, documented, and pinned by a test: a stage with **no cap and no reserve** is granted the entire remaining budget, so if its primary blows the deadline, its own fallback has zero time and is skipped. Reachable fallbacks require headroom; the reserve is that headroom.
+
 ### 6. `ContinuousClock`, concretely — not generic clocks
 
-SE-0526 is generic over `Clock & Identifiable` (with per-clock composition rules). This library pins `Deadline` to `ContinuousClock`: the task-local composition model needs one concrete instant type, and monotonic time is the only defensible basis for latency SLOs. Trade-off documented on the type: `ContinuousClock` keeps counting through device sleep, so a deadline spanning suspension has usually expired on wake — for user-facing budgets that is the desired reading. A `SuspendingClock` variant was considered and deferred rather than made generic.
+SE-0526 is generic over clocks (`withDeadline` over `C: Clock`, with `Clock & Identifiable` keying its deadline accessors and per-clock composition rules). This library pins `Deadline` to `ContinuousClock`: the task-local composition model needs one concrete instant type, and monotonic time is the only defensible basis for latency SLOs. Trade-off documented on the type: `ContinuousClock` keeps counting through device sleep, so a deadline spanning suspension has usually expired on wake — for user-facing budgets that is the desired reading. A `SuspendingClock` variant was considered and deferred rather than made generic.
 
 ### 7. An actor ledger that documents its reentrancy story
 
@@ -125,13 +134,14 @@ Hybrid on-device/cloud AI features are the canonical multi-stage budget consumer
 
 ## Testing philosophy
 
-46 XCTest cases, and none of them are decorative. The suite is built around tests that a plausibly-broken implementation would **fail**:
+48 XCTest cases, built around assertions that a plausibly-broken implementation would **fail**:
 
 - The SE-0526 fidelity pair: an operation that swallows cancellation and returns a value after expiry must have that value **returned** (a naive race throws — and fails); an error thrown while unwinding must propagate.
 - Composition: an inner scope observes the outer scope's exact instant (`XCTAssertEqual` on instants — an implementation that lets inner deadlines loosen outer ones observes an instant an hour out).
 - Policy math asserted with exact durations: ignore the reserve and `1000 − 300 = 700` becomes 1000; ignore the cap and 500 becomes 700.
 - Admission control: flags prove doomed primaries **never started**, in both the primitive (D4) and the SLO layer.
-- Discrimination: external cancellation surfaces as `CancellationError` and must **not** trigger fallbacks; timing bounds prove the 30 s sleep was actually cancelled (~0.15 s observed) rather than awaited.
+- Discrimination: external cancellation surfaces as `CancellationError` and must **not** trigger fallbacks; timing bounds prove the 30 s sleep was actually cancelled (deadline at 0.15 s; observed settle ≈ 0.15–0.3 s) rather than awaited.
+- The uncapped-stage corollary from design decision 5 is pinned from both sides: no headroom → fallback provably skipped after expiry; reserved headroom → fallback provably reachable.
 - Every clamp (negative durations, zero budgets, zero allowances, division by zero in `spentFraction`) has a test pinning the non-trapping behavior.
 
 Timing assertions use deliberately wide margins (correct ≈ 0.15 s, bound = 10 s, broken ≥ 30 s), so slow CI cannot flake them and a broken implementation cannot sneak past them.
@@ -148,14 +158,14 @@ Then depend on the `DeadlineSLO` product. iOS 17+ / macOS 14+ / any Linux with S
 
 ## Demo app
 
-Demo app: (added after the companion repo is pushed — see below)
+**[deadline-slo-kit-demo-app](https://github.com/rajatslakhina/deadline-slo-kit-demo-app)** — an interactive *SLO Budget Explorer*: run the cache → network → on-device-inference pipeline under a slider-controlled budget and watch the audit ledger change regimes (all-primary, degraded-but-met, violated). It consumes this package as a **version-pinned remote dependency** (`from: "1.0.0"`), so its CI is set up to prove, on every push, that the package resolves and builds from GitHub on a clean machine.
 
 ## Verification
 
 What was actually verified, stated exactly:
 
 - `swift build -Xswiftc -warnings-as-errors` from a clean `.build` on Swift 6.0.3 (Linux, aarch64): **Build complete, zero warnings.**
-- `swift test` on the same toolchain: **46 tests, 0 failures, 1.65 s.**
+- `swift test` on the same toolchain: **48 tests, 0 failures** (46 at the `v1.0.0` tag; two invariant tests added after adversarial review).
 - [CI](https://github.com/rajatslakhina/deadline-slo-kit/actions) runs on every push: a Linux job (swift:6.0 container) repeating the clean warnings-as-errors build plus the full test suite, and a macOS job running the test suite and a compile check for `generic/platform=iOS Simulator`.
 - This repository contains **no app target**; the runnable demo lives in the companion repo, which consumes this package as a version-pinned remote dependency.
 
