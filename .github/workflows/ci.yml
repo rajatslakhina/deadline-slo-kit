@@ -30,6 +30,8 @@ jobs:
       - name: List package schemes (diagnostic aid if the build step fails)
         run: xcodebuild -list
       - name: Compile for generic iOS Simulator
+        # Scheme is the PACKAGE name: Xcode auto-generates one scheme per package
+        # named after the package, not the product (verified via -list on CI).
         # generic/platform deliberately avoids pinning to a named simulator
         # device: runner images do not guarantee any specific runtime.
-        run: xcodebuild build -scheme DeadlineSLO -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO
+        run: xcodebuild build -scheme deadline-slo-kit -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO
